@@ -1,0 +1,274 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
+import time
+import csv
+import os
+from datetime import datetime
+from copy import deepcopy
+
+def train_and_evaluate(model, train_loader, val_loader, criterion, optimizer, 
+                      scheduler=None, epochs=10, device="cpu", model_name="model",
+                      patience=3):
+    """
+    完整的训练和验证流程（添加早停机制）
+    返回: 训练历史记录, 最佳模型权重
+    """
+    history = {
+        'train_loss': [], 'train_acc': [],
+        'val_loss': [], 'val_acc': [],
+        'epoch_time': []
+    }
+    
+    best_val_acc = 0.0
+    best_model_weights = None
+    epochs_no_improve = 0
+    
+    model.to(device)
+    
+    for epoch in range(epochs):
+        epoch_start = time.time()
+        
+        # 训练阶段
+        model.train()
+        train_loss, train_correct, train_total = 0.0, 0, 0
+        
+        for images, labels in train_loader:
+            images, labels = images.to(device), labels.to(device)
+            
+            # 前向传播
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            
+            # 反向传播
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            # 统计指标
+            train_loss += loss.item() * images.size(0)  # 按样本数加权
+            _, predicted = torch.max(outputs.data, 1)
+            train_total += labels.size(0)
+            train_correct += (predicted == labels).sum().item()
+        
+        # 验证阶段
+        val_loss, val_correct, val_total = evaluate_model(model, val_loader, criterion, device)
+        
+        # 计算指标（按样本数平均）
+        train_loss = train_loss / train_total
+        train_acc = 100 * train_correct / train_total
+        val_loss = val_loss / val_total
+        val_acc = 100 * val_correct / val_total
+        
+        # 更新学习率
+        if scheduler:
+            scheduler.step(val_loss)  # 通常根据验证损失调整
+        
+        # 记录历史
+        history['train_loss'].append(train_loss)
+        history['train_acc'].append(train_acc)
+        history['val_loss'].append(val_loss)
+        history['val_acc'].append(val_acc)
+        history['epoch_time'].append(time.time() - epoch_start)
+        
+        # 早停检查和保存最佳模型
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_model_weights = deepcopy(model.state_dict())
+            torch.save(best_model_weights, f'best_{model_name}.pth')
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= patience:
+                print(f"Early stopping at epoch {epoch+1}")
+                break
+        
+        # 打印进度
+        print(f"Epoch [{epoch+1}/{epochs}] "
+              f"Train Loss: {train_loss:.4f} Acc: {train_acc:.2f}% | "
+              f"Val Loss: {val_loss:.4f} Acc: {val_acc:.2f}% | "
+              f"Time: {history['epoch_time'][-1]:.2f}s")
+    
+    # 恢复最佳权重
+    if best_model_weights:
+        model.load_state_dict(best_model_weights)
+        
+    return history, best_model_weights
+
+def evaluate_model(model, data_loader, criterion, device="cpu"):
+    """评估模型在给定数据集上的表现（修正损失计算）"""
+    model.eval()
+    total_loss = 0.0
+    correct = 0
+    total = 0
+    
+    with torch.no_grad():
+        for images, labels in data_loader:
+            images, labels = images.to(device), labels.to(device)
+            
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            
+            total_loss += loss.item() * images.size(0)  # 按样本数加权
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+    
+    return total_loss, correct, total
+
+def hyperparameter_search(model_class, train_dataset, val_dataset, param_grid, 
+                         epochs=10, device="cpu", num_workers=2):
+    """
+    重构的超参数搜索（动态创建数据加载器）
+    返回: 所有参数组合的结果列表
+    """
+    results = []
+    
+    # 生成所有参数组合
+    all_params = []
+    for lr in param_grid.get('lr', [0.001]):
+        for batch_size in param_grid.get('batch_size', [64]):
+            for weight_decay in param_grid.get('weight_decay', [0]):
+                all_params.append({
+                    'lr': lr,
+                    'batch_size': batch_size,
+                    'weight_decay': weight_decay
+                })
+    
+    print(f"Starting hyperparameter search with {len(all_params)} combinations...")
+    
+    for i, params in enumerate(all_params):
+        print(f"\n=== Testing combination {i+1}/{len(all_params)}: {params} ===")
+        
+        # 动态创建数据加载器
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=params['batch_size'],
+            shuffle=True,
+            num_workers=num_workers
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=params['batch_size'],
+            shuffle=False,
+            num_workers=num_workers
+        )
+        
+        # 创建模型并提前分配到设备
+        model = model_class().to(device)
+        
+        # 创建优化器
+        optimizer = optim.Adam(
+            model.parameters(), 
+            lr=params['lr'],
+            weight_decay=params['weight_decay']
+        )
+        
+        # 训练模型
+        model_name = f"model_lr{params['lr']}_bs{params['batch_size']}_wd{params['weight_decay']}"
+        history, best_weights = train_and_evaluate(
+            model, train_loader, val_loader, 
+            nn.CrossEntropyLoss(), optimizer,
+            epochs=epochs, device=device,
+            model_name=model_name,
+            patience=3  # 添加早停
+        )
+        
+        # 记录结果
+        result = {
+            'lr': params['lr'],
+            'batch_size': params['batch_size'],
+            'weight_decay': params['weight_decay'],
+            'best_val_acc': max(history['val_acc']),
+            'final_train_acc': history['train_acc'][-1],
+            'total_time': sum(history['epoch_time']),
+            'model_name': model_name,
+            'epochs_trained': len(history['train_acc']),
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        results.append(result)
+        
+        # 保存结果到CSV
+        save_results_to_csv([result])
+    
+    return results
+
+# 保存结果函数保持不变
+def save_results_to_csv(results, filename="hyperparam_results.csv"):
+    """将超参数搜索结果保存到CSV文件"""
+    file_exists = os.path.isfile(filename)
+    
+    with open(filename, 'a', newline='') as f:
+        writer = csv.writer(f)
+        
+        if not file_exists:
+            headers = list(results[0].keys())
+            writer.writerow(headers)
+        
+        for result in results:
+            writer.writerow(list(result.values()))
+
+# 使用示例
+if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    # 示例数据集（实际需替换为MNIST加载代码）
+    class DummyDataset(Dataset):
+        def __init__(self, length=1000):
+            self.data = torch.randn(length, 1, 28, 28)
+            self.labels = torch.randint(0, 10, (length,))
+        
+        def __len__(self):
+            return len(self.data)
+        
+        def __getitem__(self, idx):
+            return self.data[idx], self.labels[idx]
+    
+    # 创建模拟数据集
+    train_dataset = DummyDataset(50000)
+    val_dataset = DummyDataset(10000)
+    
+    # 示例CNN模型
+    class CNN(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv1 = nn.Conv2d(1, 32, 3, 1)
+            self.conv2 = nn.Conv2d(32, 64, 3, 1)
+            self.fc1 = nn.Linear(9216, 128)
+            self.fc2 = nn.Linear(128, 10)
+        
+        def forward(self, x):
+            x = torch.relu(self.conv1(x))
+            x = torch.max_pool2d(x, 2)
+            x = torch.relu(self.conv2(x))
+            x = torch.max_pool2d(x, 2)
+            x = torch.flatten(x, 1)
+            x = torch.relu(self.fc1(x))
+            return self.fc2(x)
+    
+    # 定义参数网格
+    param_grid = {
+        'lr': [0.01, 0.001, 0.0001],
+        'batch_size': [64, 128, 256],
+        'weight_decay': [0, 1e-4]  # 注意修正参数名
+    }
+    
+    # 执行超参数搜索
+    search_results = hyperparameter_search(
+        CNN,
+        train_dataset,
+        val_dataset,
+        param_grid,
+        epochs=20,
+        device=device
+    )
+    
+    # 找到最佳参数组合
+    if search_results:
+        best_result = max(search_results, key=lambda x: x['best_val_acc'])
+        print(f"\nBest hyperparameters: lr={best_result['lr']}, "
+              f"batch_size={best_result['batch_size']}, "
+              f"weight_decay={best_result.get('weight_decay', 'N/A')} "
+              f"with val_acc={best_result['best_val_acc']:.2f}%")
