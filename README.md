@@ -28,26 +28,4 @@
   torchvision==0.15.1
   flask==2.2.3
   pillow==9.4.0
-
-## 文件结构
-
-project/
-├── app.py                 # 主应用文件
-├── best_model.pth         # 主模型权重
-├── pretrained_mnist_cnn.pth # 后备模型权重
-├── templates/             # HTML 模板
-│   └── index.html         
-└── debug_images/          # 调试图像存储（自动创建）
-
-## 模型架构
-
-class CNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.fc1 = nn.Linear(64 * 7 * 7, 128)
-        self.fc2 = nn.Linear(128, 10)
-        self.dropout = nn.Dropout(0.25)  # 防过拟合
         
